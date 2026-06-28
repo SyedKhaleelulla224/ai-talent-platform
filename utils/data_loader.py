@@ -21,11 +21,24 @@ logger = get_logger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner="Loading dataset …", ttl=3600)
+@st.cache_resource(show_spinner="Loading dataset …")
 def load_data(filepath: Optional[str | Path] = None) -> pd.DataFrame:
     """
-    Load the AI Jobs dataset. Prefers parquet (fast + small), falls back to xlsx.
-    Returns memory-optimised DataFrame with categoricals and truncated descriptions.
+    Load and enrich the AI Jobs dataset.
+
+    Uses ``st.cache_resource`` (not ``cache_data``) so the entire enriched
+    DataFrame is shared across all user sessions — only one ~15 MB copy in
+    memory instead of one per user. This dramatically reduces RAM on
+    Streamlit Cloud's free tier.
+
+    IMPORTANT: callers MUST treat the returned DataFrame as read-only.
+    Use ``.copy()`` before any mutation. The ``filter_dataframe()`` helper
+    already does this correctly.
+
+    Returns
+    -------
+    pd.DataFrame
+        Memory-optimised, enriched dataset with categoricals.
     """
     parquet_path = config.DATA_DIR / "ai_jobs.parquet"
     xlsx_path    = Path(filepath) if filepath else config.DATA_FILE
@@ -36,7 +49,6 @@ def load_data(filepath: Optional[str | Path] = None) -> pd.DataFrame:
     elif xlsx_path.exists():
         logger.info("Reading dataset from %s", xlsx_path)
         df = pd.read_excel(xlsx_path, sheet_name=config.SHEET_NAME, engine="openpyxl")
-        # Truncate descriptions to keep memory in check
         if config.COL_DESCRIPTION in df.columns:
             df[config.COL_DESCRIPTION] = (
                 df[config.COL_DESCRIPTION].fillna("").astype(str).str.slice(0, 800)
@@ -51,10 +63,19 @@ def load_data(filepath: Optional[str | Path] = None) -> pd.DataFrame:
     logger.info("Raw shape: %s rows × %s cols", *df.shape)
     df = _enrich(df)
     df = _optimise_memory(df)
-    logger.info("Enriched shape: %s rows × %s cols (%.1f MB)",
+    logger.info("Enriched shape: %s rows × %s cols (%.1f MB) — shared across all sessions",
                 df.shape[0], df.shape[1],
                 df.memory_usage(deep=True).sum() / 1024 / 1024)
     return df
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_90d_cached() -> pd.DataFrame:
+    """
+    Return the 90-day slice as a cacheable, per-session copy.
+    Used by pages that need to safely modify the frame.
+    """
+    return get_90d(load_data())
 
 
 def _optimise_memory(df: pd.DataFrame) -> pd.DataFrame:
